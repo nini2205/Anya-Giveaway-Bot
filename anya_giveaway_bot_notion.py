@@ -21,13 +21,6 @@ import aiohttp
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
-print("Booting Anya bot…")
-print("Env check:",
-      "BOT_TOKEN set" if bool(BOT_TOKEN) else "BOT_TOKEN MISSING",
-      "NOTION_TOKEN set" if bool(NOTION_TOKEN) else "NOTION_TOKEN MISSING",
-      "NOTION_DB_ID set" if bool(NOTION_DB_ID) else "NOTION_DB_ID MISSING",
-)
-
 def _parse_channel_id(s: str | None):
     if not s:
         return None
