@@ -195,18 +195,18 @@ class NotionStore:
             return []
 
     def export_rows(self, limit=1000):
-    rows = []
-    try:
-        res = self.notion.databases.query(database_id=self.db_id, page_size=min(limit, 100))
-        rows.extend(self._page_to_row(p) for p in res.get("results", []))
-        while res.get("has_more") and len(rows) < limit:
-            res = self.notion.databases.query(
-                database_id=self.db_id,
-                start_cursor=res["next_cursor"],
-                page_size=min(limit - len(rows), 100),
-            )
+        rows = []
+        try:
+            res = self.notion.databases.query(database_id=self.db_id, page_size=min(limit, 100))
             rows.extend(self._page_to_row(p) for p in res.get("results", []))
-    except Exception as e:
-        print(f"[Notion ERROR] export_rows failed: {e}")
-    return rows
+            while res.get("has_more") and len(rows) < limit:
+                res = self.notion.databases.query(
+                    database_id=self.db_id,
+                    start_cursor=res["next_cursor"],
+                    page_size=min(limit - len(rows), 100),
+                )
+                rows.extend(self._page_to_row(p) for p in res.get("results", []))
+        except Exception as e:
+            print(f"[Notion ERROR] export_rows failed: {e}")
+        return rows
 
