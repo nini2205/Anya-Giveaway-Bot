@@ -2,7 +2,7 @@
 # ---------------------------------------------------------------
 # A single-file Discord giveaway bot using SQLite (async, safe for concurrency)
 # Requirements:
-#   pip install -U discord.py aiosqlite
+#   pip install -U discord.py aiosqlite aiohttp
 #
 # Env:
 #   BOT_TOKEN (required)
@@ -215,9 +215,14 @@ async def on_ready():
     db_conn = await open_db()
     try:
         if GUILD_ID:
-            await tree.sync(guild=discord.Object(id=GUILD_ID))  # instant in that guild
+            guild_obj = discord.Object(id=GUILD_ID)
+            # Purge old guild commands (e.g., legacy /add_winner signature) and
+            # re-publish current globals to the guild for instant updates.
+            tree.clear_commands(guild=guild_obj)
+            tree.copy_global_to(guild=guild_obj)
+            await tree.sync(guild=guild_obj)   # instant in that guild
         else:
-            await tree.sync()  # global sync (can take time)
+            await tree.sync()                   # global sync (can take time)
     except Exception as e:
         await log_event(bot, f"Slash sync error: {e}")
     await log_event(bot, f"✅ Logged in as {bot.user} | DB: {DB_PATH}")
@@ -260,15 +265,6 @@ async def add_links_file(interaction: discord.Interaction, file: discord.Attachm
     added = await add_links(db_conn, codes, actor_user_id=str(interaction.user.id))
     await interaction.followup.send(f"Added {added} link(s) from file.", ephemeral=True)
     await log_event(bot, f"ADD_LINKS_FILE by {interaction.user} count={added} file={file.filename}")
-
-# -------- Admin: legacy /add_winner (string id) --------
-@tree.command(name="add_winner", description="Admin: register a winner by user ID (optionally allow multiple claims).")
-@admin_only()
-async def add_winner_cmd(interaction: discord.Interaction, user_id: str, allow_multiple: bool = False):
-    assert db_conn is not None
-    ok = await add_winner(db_conn, user_id=user_id, username=None, allow_multiple=allow_multiple)
-    await interaction.response.send_message("Winner added." if ok else "Winner already exists.", ephemeral=True)
-    await log_event(bot, f"ADD_WINNER by {interaction.user} target={user_id} allow_multiple={allow_multiple}")
 
 # -------- Admin: new /add_winner_v2 (user picker) --------
 @bot.tree.command(name="add_winner_v2", description="Admin: register a winner (optionally allow multiple).")
