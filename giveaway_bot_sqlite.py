@@ -110,21 +110,21 @@ async def add_links(conn: aiosqlite.Connection, codes: Sequence[str], actor_user
     return added
 
 # -------- Admin: /add_winner_v2 --------
-@tree.command(
+@bot.tree.command(
     name="add_winner_v2",
-    description="Admin: register a winner (optionally allow multiple claims)."
+    description="Admin: register a winner (optionally allow multiple)."
 )
 @admin_only()
 async def add_winner_v2(
     interaction: discord.Interaction,
-    user: discord.User,                      # <-- picker/mention-friendly
+    user: discord.User,
     allow_multiple: bool = False
 ):
     assert db_conn is not None
     ok = await add_winner(
         db_conn,
         user_id=str(user.id),
-        username=str(user),                  # e.g., 'Maya#1234' or new display format
+        username=str(user),
         allow_multiple=allow_multiple
     )
     await interaction.response.send_message(
