@@ -1,6 +1,6 @@
 # giveaway_bot_postgres.py
 # ---------------------------------------------------------------
-# Discord giveaway bot backed by PostgreSQL (Railway Postgres + asyncpg)
+# Discord giveaway bot backed by PostgreSQL (Railway/Neon/Supabase) using asyncpg
 # Env:
 #   BOT_TOKEN (required)
 #   DATABASE_URL (required)  e.g. postgresql://user:pass@host:port/db
@@ -127,7 +127,7 @@ async def claim_one_link(user_id: str) -> Optional[str]:
         return None
 
     async with pool.acquire() as conn, conn.transaction():
-        # lock a 'new' row
+        # Lock a single 'new' row without blocking others
         row = await conn.fetchrow(
             "SELECT id, code FROM gift_links WHERE status='new' ORDER BY id ASC FOR UPDATE SKIP LOCKED LIMIT 1"
         )
@@ -135,7 +135,8 @@ async def claim_one_link(user_id: str) -> Optional[str]:
             return None
         link_id, code = row["id"], row["code"]
         updated = await conn.execute(
-            "UPDATE gift_links SET status='claimed', claimed_by=$1, claimed_at=NOW() WHERE id=$2 AND status='new'",
+            "UPDATE gift_links SET status='claimed', claimed_by=$1, claimed_at=NOW() "
+            "WHERE id=$2 AND status='new'",
             user_id, link_id
         )
         if updated.endswith("1"):
@@ -210,12 +211,33 @@ async def on_ready():
             guild = discord.Object(id=GUILD_ID)
             tree.clear_commands(guild=guild)
             tree.copy_global_to(guild=guild)
-            await tree.sync(guild=guild)
+            await tree.sync(guild=guild)  # instant in that guild
         else:
-            await tree.sync()
+            await tree.sync()             # global sync (can take time)
     except Exception as e:
         await log_event(f"Slash sync error: {e}")
     await log_event(f"✅ Logged in as {bot.user} | Postgres ready")
+
+# -------- Global app command error handler --------
+@tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: Exception):
+    import traceback
+    async def _safe_send(msg: str):
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(msg, ephemeral=True)
+        except Exception:
+            pass
+
+    if isinstance(error, app_commands.CheckFailure):
+        await _safe_send("You don’t have permission to use this command.")
+        return
+
+    tb = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    print("[appcmd error]", tb)
+    await _safe_send("Something went wrong while running that command.")
 
 # -------- User: /claim --------
 @tree.command(name="claim", description="Claim your Nitro link (if you're eligible).")
@@ -257,22 +279,25 @@ async def add_links_file(interaction: discord.Interaction, file: discord.Attachm
 @bot.tree.command(name="add_winner", description="Admin: register a winner (optionally allow multiple).")
 @admin_only()
 async def add_winner_cmd(interaction: discord.Interaction, user: discord.User, allow_multiple: bool = False):
+    await interaction.response.defer(ephemeral=True)
     ok = await add_winner(str(user.id), str(user), allow_multiple)
-    await interaction.response.send_message("Winner added." if ok else "Winner already exists.", ephemeral=True)
+    await interaction.followup.send("Winner added." if ok else "Winner already exists.", ephemeral=True)
     await log_event(f"ADD_WINNER by {interaction.user} target={user} ({user.id}) allow_multiple={allow_multiple}")
 
 # -------- Admin: /disable_link --------
 @tree.command(name="disable_link", description="Admin: disable a specific gift link code.")
 @admin_only()
 async def disable_link_cmd(interaction: discord.Interaction, code: str):
+    await interaction.response.defer(ephemeral=True)
     ok = await disable_link(code, actor_user_id=str(interaction.user.id))
-    await interaction.response.send_message("Disabled." if ok else "Code not found.", ephemeral=True)
+    await interaction.followup.send("Disabled." if ok else "Code not found.", ephemeral=True)
     await log_event(f"DISABLE_LINK by {interaction.user} code={code} ok={ok}")
 
 # -------- Admin: /stats --------
 @tree.command(name="stats", description="Admin: show giveaway stats.")
 @admin_only()
 async def stats_cmd(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
     s = await stats()
     msg = (
         f"**Links**\n"
@@ -282,7 +307,7 @@ async def stats_cmd(interaction: discord.Interaction):
         f"- Disabled: {s['disabled_links']}\n\n"
         f"**Winners**: {s['winners']}"
     )
-    await interaction.response.send_message(msg, ephemeral=True)
+    await interaction.followup.send(msg, ephemeral=True)
 
 # ------------------------------ CSV Import (one-offs) ------------------------------
 async def import_links_csv(path: str):
@@ -301,7 +326,7 @@ async def import_winners_csv(path: str):
         reader = csv.DictReader(f)
         cnt = 0
         async with pool.acquire() as conn, conn.transaction():
-            async def add(user_id, username, allow_multiple):
+            async def add_row(user_id, username, allow_multiple):
                 try:
                     await conn.execute(
                         "INSERT INTO winners (user_id, username, allow_multiple) VALUES ($1,$2,$3)",
@@ -315,7 +340,7 @@ async def import_winners_csv(path: str):
                 if not user_id: continue
                 username = (row.get("username") or "").strip() or None
                 allow_multiple = str(row.get("allow_multiple", "0")).strip().lower() in ("1","true","yes")
-                await add(user_id, username, allow_multiple)
+                await add_row(user_id, username, allow_multiple)
                 cnt += 1
     print(f"Imported ~{cnt} winners from {path}.")
 
