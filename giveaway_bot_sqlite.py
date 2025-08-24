@@ -361,27 +361,30 @@ async def import_winners_csv(path: str):
     print(f"Imported ~{cnt} winners from {path}.")
 
 # ------------------------------ Entrypoint ------------------------------
-async def _amain(argv: list[str]):
-    # Simple CLI: allow importing CSVs or running the bot
-    # Usage examples:
+# NOTE: Avoid nesting event loops. Use bot.run() in the normal path (it manages
+# its own loop). Only use asyncio.run() for the CSV import helpers.
+
+def main(argv: list[str]):
+    # CLI usage:
     #   python giveaway_bot_sqlite.py --import-links links.csv
     #   python giveaway_bot_sqlite.py --import-winners winners.csv
     #   python giveaway_bot_sqlite.py              # run the bot
     if len(argv) >= 3 and argv[1] == "--import-links":
-        await import_links_csv(argv[2])
+        asyncio.run(import_links_csv(argv[2]))
         return
     if len(argv) >= 3 and argv[1] == "--import-winners":
-        await import_winners_csv(argv[2])
+        asyncio.run(import_winners_csv(argv[2]))
         return
 
     if not BOT_TOKEN:
         print("ERROR: BOT_TOKEN is not set.")
         sys.exit(1)
 
+    # Normal run: let discord.py manage the event loop internally
     bot.run(BOT_TOKEN)
 
 if __name__ == "__main__":
     try:
-        asyncio.run(_amain(sys.argv))
+        main(sys.argv)
     except KeyboardInterrupt:
         pass
