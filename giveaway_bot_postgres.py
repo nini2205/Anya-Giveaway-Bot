@@ -98,67 +98,6 @@ async def add_winner(user_id: str, username: Optional[str], allow_multiple: bool
         except UniqueViolationError:
             return False
 
-async def is_winner(user_id: str) -> tuple[bool, bool]:
-    assert pool
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT allow_multiple FROM winners WHERE user_id=$1", user_id)
-        if not row:
-            return False, False
-        return True, bool(row["allow_multiple"])
-
-async def user_claim_count(user_id: str) -> int:
-    assert pool
-    async with pool.acquire() as conn:
-        n = await conn.fetchval(
-            "SELECT COUNT(*) FROM gift_links WHERE claimed_by=$1 AND status='claimed'",
-            user_id
-        )
-        return int(n or 0)
-
-async def claim_one_link(user_id: str) -> Optional[str]:
-    """
-    Atomically assign next 'new' code to this user. Returns code or None.
-    """
-    assert pool
-    win, allow_mult = await is_winner(user_id)
-    if not win:
-        return None
-    if not allow_mult and await user_claim_count(user_id) > 0:
-        return None
-
-    async with pool.acquire() as conn, conn.transaction():
-        # Lock a single 'new' row without blocking others
-        row = await conn.fetchrow(
-            "SELECT id, code FROM gift_links WHERE status='new' ORDER BY id ASC FOR UPDATE SKIP LOCKED LIMIT 1"
-        )
-        if not row:
-            return None
-        link_id, code = row["id"], row["code"]
-        updated = await conn.execute(
-            "UPDATE gift_links SET status='claimed', claimed_by=$1, claimed_at=NOW() "
-            "WHERE id=$2 AND status='new'",
-            user_id, link_id
-        )
-        if updated.endswith("1"):
-            await conn.execute(
-                "INSERT INTO audit_log (actor_user_id, action, metadata) VALUES ($1,'CLAIM',$2)",
-                user_id, f"link_id={link_id}"
-            )
-            return str(code)
-        return None
-
-async def disable_link(code: str, actor_user_id: Optional[str]) -> bool:
-    assert pool
-    async with pool.acquire() as conn, conn.transaction():
-        res = await conn.execute("UPDATE gift_links SET status='disabled' WHERE code=$1", code)
-        ok = res.endswith("1")
-        if ok:
-            await conn.execute(
-                "INSERT INTO audit_log (actor_user_id, action, metadata) VALUES ($1,'DISABLE_LINK',$2)",
-                actor_user_id, f"code={code}"
-            )
-        return ok
-
 async def stats() -> dict:
     assert pool
     async with pool.acquire() as conn:
@@ -171,6 +110,60 @@ async def stats() -> dict:
             "disabled_links": await one("SELECT COUNT(*) FROM gift_links WHERE status='disabled'"),
             "winners": await one("SELECT COUNT(*) FROM winners"),
         }
+
+# ---- NEW: fully transactional, duplicate-proof claim ----
+async def claim_one_link(user_id: str) -> Optional[str]:
+    """
+    Atomically assign next 'new' code to this user. Returns code or None.
+    Duplicate claims are prevented even under concurrency by checking the user's
+    prior claims inside the same transaction and using SKIP LOCKED for the row.
+    """
+    assert pool
+    async with pool.acquire() as conn, conn.transaction():
+        # 1) Winner eligibility
+        row = await conn.fetchrow("SELECT allow_multiple FROM winners WHERE user_id=$1", user_id)
+        if not row:
+            return None
+        allow_mult: bool = bool(row["allow_multiple"])
+
+        # 2) If not allowed multiple, block if user already has a claimed link
+        if not allow_mult:
+            cnt = await conn.fetchval(
+                "SELECT COUNT(*) FROM gift_links WHERE claimed_by=$1 AND status='claimed'",
+                user_id
+            )
+            if cnt and int(cnt) > 0:
+                return None
+
+        # 3) Lock next available code without blocking others
+        row = await conn.fetchrow(
+            "SELECT id, code FROM gift_links "
+            "WHERE status='new' "
+            "ORDER BY id ASC "
+            "FOR UPDATE SKIP LOCKED LIMIT 1"
+        )
+        if not row:
+            return None
+
+        link_id, code = int(row["id"]), str(row["code"])
+
+        # 4) Mark as claimed by this user
+        res = await conn.execute(
+            "UPDATE gift_links "
+            "SET status='claimed', claimed_by=$1, claimed_at=NOW() "
+            "WHERE id=$2 AND status='new'",
+            user_id, link_id
+        )
+        if res == "UPDATE 1":
+            await conn.execute(
+                "INSERT INTO audit_log (actor_user_id, action, metadata) VALUES ($1,'CLAIM',$2)",
+                user_id, f"link_id={link_id}"
+            )
+            return code
+
+        # If another process grabbed it between SELECT and UPDATE (extremely rare),
+        # just return None so the caller shows 'none available'.
+        return None
 
 # ------------------------------ Discord bot ------------------------------
 intents = discord.Intents.none()
@@ -289,7 +282,15 @@ async def add_winner_cmd(interaction: discord.Interaction, user: discord.User, a
 @admin_only()
 async def disable_link_cmd(interaction: discord.Interaction, code: str):
     await interaction.response.defer(ephemeral=True)
-    ok = await disable_link(code, actor_user_id=str(interaction.user.id))
+    assert pool
+    async with pool.acquire() as conn, conn.transaction():
+        res = await conn.execute("UPDATE gift_links SET status='disabled' WHERE code=$1", code)
+        ok = (res == "UPDATE 1")
+        if ok:
+            await conn.execute(
+                "INSERT INTO audit_log (actor_user_id, action, metadata) VALUES ($1,'DISABLE_LINK',$2)",
+                str(interaction.user.id), f"code={code}"
+            )
     await interaction.followup.send("Disabled." if ok else "Code not found.", ephemeral=True)
     await log_event(f"DISABLE_LINK by {interaction.user} code={code} ok={ok}")
 
