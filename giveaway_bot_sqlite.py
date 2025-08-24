@@ -109,20 +109,32 @@ async def add_links(conn: aiosqlite.Connection, codes: Sequence[str], actor_user
         raise
     return added
 
-async def add_winner(conn: aiosqlite.Connection, user_id: str, username: Optional[str] = None, allow_multiple: bool = False) -> bool:
-    try:
-        await conn.execute(
-            "INSERT INTO winners (user_id, username, allow_multiple) VALUES (?,?,?)",
-            (user_id, username, 1 if allow_multiple else 0)
-        )
-        await conn.execute(
-            "INSERT INTO audit_log (actor_user_id, action, metadata) VALUES (?, 'ADD_WINNER', ?)",
-            (user_id, f"username={username},allow_multiple={allow_multiple}")
-        )
-        await conn.commit()
-        return True
-    except aiosqlite.IntegrityError:
-        return False
+# -------- Admin: /add_winner_v2 --------
+@tree.command(
+    name="add_winner_v2",
+    description="Admin: register a winner (optionally allow multiple claims)."
+)
+@admin_only()
+async def add_winner_v2(
+    interaction: discord.Interaction,
+    user: discord.User,                      # <-- picker/mention-friendly
+    allow_multiple: bool = False
+):
+    assert db_conn is not None
+    ok = await add_winner(
+        db_conn,
+        user_id=str(user.id),
+        username=str(user),                  # e.g., 'Maya#1234' or new display format
+        allow_multiple=allow_multiple
+    )
+    await interaction.response.send_message(
+        "Winner added." if ok else "Winner already exists.",
+        ephemeral=True
+    )
+    await log_event(
+        bot,
+        f"ADD_WINNER by {interaction.user} target={user} ({user.id}) allow_multiple={allow_multiple}"
+    )
 
 async def is_winner(conn: aiosqlite.Connection, user_id: str) -> tuple[bool, bool]:
     async with conn.execute(
